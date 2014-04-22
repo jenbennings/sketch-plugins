@@ -1,0 +1,508 @@
+// Sketch Framer draft (ctrl alt command f)
+
+/*
+This is a port to JSTalk of <https://github.com/leighmcculloch/AppSandboxFileAccess>
+
+Here's the original license for AppSandboxFileAccess:
+
+## License
+
+Copyright (c) 2013, Leigh McCulloch All rights reserved.
+
+BSD-2-Clause License: http://opensource.org/licenses/BSD-2-Clause
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+var AppSandboxFileAccessPersist = {
+  keyForBookmarkDataForURL: function(url) {
+    log("AppSandboxFileAccessPersist.keyForBookmarkDataForURL("+url+")")
+    var urlStr = [url absoluteString];
+    log("> " + [NSString stringWithFormat:@"bd_%1$@", urlStr])
+    return [NSString stringWithFormat:@"bd_%1$@", urlStr];
+  },
+  bookmarkDataForURL: function(url) {
+    log("AppSandboxFileAccessPersist.bookmarkDataForURL('"+ url +"')")
+    var defaults = [NSUserDefaults standardUserDefaults];
+
+    // loop through the bookmarks one path at a time down the URL
+    var subUrl = url;
+    while ([subUrl path].length() > 1) { // give up when only '/' is left in the path
+      var key = AppSandboxFileAccessPersist.keyForBookmarkDataForURL(subUrl);
+      var bookmark = [defaults dataForKey:key];
+      if (bookmark) { // if a bookmark is found, return it
+        return bookmark;
+      }
+      subUrl = [subUrl URLByDeletingLastPathComponent];
+    }
+    // no bookmarks for the URL, or parent to the URL were found
+    return nil;
+  },
+  setBookmarkData: function(data, url) {
+    log("AppSandboxFileAccessPersist.setBookmarkData")
+    log("data: " + data)
+    log("URL: " + url)
+    var defaults = [NSUserDefaults standardUserDefaults];
+    var key = AppSandboxFileAccessPersist.keyForBookmarkDataForURL(url);
+    [defaults setObject:data forKey:key];
+  }
+}
+
+var AppSandboxFileAccess = {
+  init: function(opts){
+    this.message = opts.message || "Please authorize Sketch to write to this folder. You will only need to do this once."
+    this.prompt = opts.prompt || "Authorize",
+    this.title = opts.title || "Sketch Authorization"
+    return this;
+  },
+  askPermissionForUrl: function(url) {
+    log("AppSandboxFileAccess.askPermissionForUrl("+url+")")
+    // this url will be the url allowed, it might be a parent url of the url passed in
+    var allowedUrl;
+
+    // create delegate that will limit which files in the open panel can be selected, to ensure only a folder
+    // or file giving permission to the file requested can be selected
+    // AppSandboxFileAccessOpenSavePanelDelegate *openPanelDelegate = [[AppSandboxFileAccessOpenSavePanelDelegate alloc] initWithFileURL:url];
+
+    // check that the url exists, if it doesn't, find the parent path of the url that does exist and ask permission for that
+    var fileManager = [NSFileManager defaultManager];
+    var path = [url path];
+    while (path.length() > 1) { // give up when only '/' is left in the path or if we get to a path that exists
+      if ([fileManager fileExistsAtPath:path]) {
+        break;
+      }
+      path = [path stringByDeletingLastPathComponent];
+    }
+    log("Looks like we have a winner: " + path)
+    url = [NSURL fileURLWithPath:path];
+
+    // display the open panel
+    var openPanel = [NSOpenPanel openPanel];
+    [openPanel setMessage:this.message];
+    [openPanel setPrompt:this.prompt];
+    [openPanel setTitle:this.title];
+    // [openPanel setDelegate:openPanelDelegate];
+    [openPanel setCanCreateDirectories:NO];
+    [openPanel setCanChooseFiles:YES];
+    [openPanel setCanChooseDirectories:YES];
+    [openPanel setAllowsMultipleSelection:NO];
+    [openPanel setShowsHiddenFiles:NO];
+    [openPanel setExtensionHidden:NO];
+    [openPanel setDirectoryURL:url];
+    [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+    var openPanelButtonPressed = [openPanel runModal];
+    if (openPanelButtonPressed == NSFileHandlingPanelOKButton) {
+      allowedUrl = [openPanel URL];
+    }
+    return allowedUrl;
+  },
+  persistPermissionPath: function(path) {
+    this.persistPermissionURL([NSURL fileURLWithPath:path]);
+  },
+  persistPermissionURL: function(url) {
+    log("AppSandboxFileAccess.persistPermissionURL("+url+")")
+    // store the sandbox permissions
+    url = [[url URLByStandardizingPath] URLByResolvingSymlinksInPath]
+    var bookmarkData = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope
+                           includingResourceValuesForKeys:nil
+                           relativeToURL:nil
+                           error:null];
+    if (bookmarkData) {
+      AppSandboxFileAccessPersist.setBookmarkData(bookmarkData, url);
+    }
+  },
+  accessFilePath_withBlock_persistPermission: function(path, block, persist) {
+    log("AppSandboxFileAccess.accessFilePath_withBlock_persistPermission")
+    log("path: " + path)
+    return AppSandboxFileAccess.accessFileURL_withBlock_persistPermission([NSURL fileURLWithPath:path], block, persist);
+  },
+  accessFileURL_withBlock_persistPermission: function(fileUrl, block, persist) {
+    log("AppSandboxFileAccess.accessFileURL_withBlock_persistPermission")
+    log("fileUrl: " + fileUrl)
+    log("block: " + block)
+    log("persist: " + persist)
+    var allowedUrl = false;
+    // standardize the file url and remove any symlinks so that the url we lookup in bookmark data would match a url given by the askPermissionForUrl method
+    var fileUrl = [[fileUrl URLByStandardizingPath] URLByResolvingSymlinksInPath];
+    // lookup bookmark data for this url, this will automatically load bookmark data for a parent path if we have it
+    var bookmarkData = AppSandboxFileAccessPersist.bookmarkDataForURL(fileUrl);
+
+    if (bookmarkData) {
+      log("Bookmark data found")
+      // resolve the bookmark data into an NSURL object that will allow us to use the file
+      var bookmarkDataIsStale;
+      allowedUrl = [NSURL URLByResolvingBookmarkData:bookmarkData options:NSURLBookmarkResolutionWithSecurityScope|NSURLBookmarkResolutionWithoutUI relativeToURL:nil bookmarkDataIsStale:bookmarkDataIsStale error:null];
+      // if the bookmark data is stale, we'll create new bookmark data further down
+      if (bookmarkDataIsStale) {
+        bookmarkData = nil;
+      }
+    } else {
+      log("No bookmark data found")
+    }
+
+    // if allowed url is nil, we need to ask the user for permission
+    if (!allowedUrl) {
+      allowedUrl = AppSandboxFileAccess.askPermissionForUrl(fileUrl);
+      if (!allowedUrl) {
+        // if the user did not give permission, exit out here
+        return false;
+      }
+    }
+    // if we have no bookmark data, we need to create it, this may be because our bookmark data was stale, or this is the first time being given permission
+    if (persist && !bookmarkData) {
+      AppSandboxFileAccess.persistPermissionURL(allowedUrl);
+    }
+    // execute the block with the file access permissions
+    try {
+      [allowedUrl startAccessingSecurityScopedResource];
+      block();
+    } finally {
+      [allowedUrl stopAccessingSecurityScopedResource];
+    }
+    return true;
+  }
+}
+function in_sandbox(){
+  var environ = [[NSProcessInfo processInfo] environment];
+  return (nil != [environ objectForKey:@"APP_SANDBOX_CONTAINER_ID"]);
+}
+var sandboxAccess = AppSandboxFileAccess.init({
+  message: "Please authorize Sketch to write to this folder. You will only need to do this once per folder.",
+  prompt:  "Authorize",
+  title: "Sketch Authorization"
+})
+
+
+/* Configuration */
+
+var s = selection[0];
+var style = [s style];
+
+var borders = [style borders],
+    fills = [style fills],
+    shadows = [style shadows],
+    innerShadows = [style innerShadows]
+
+var fills_array = [fills array]
+    for(var i=0; i < [fills_array length]; i++)
+      {
+        var current_fill = fills_array[i]
+      }
+
+var color = [[current_fill color] stringValueWithAlpha:YES];
+
+var framerjs_url = "https://raw.github.com/koenbok/Framer/master/build/framer.js";
+
+function should_become_view(layer) {
+  return is_group(layer) || [layer name].slice(-1) == '+';
+}
+function is_group(layer) {
+  return [layer isMemberOfClass:[MSLayerGroup class]] || [layer isMemberOfClass:[MSArtboardGroup class]]
+}
+function should_ignore_layer(layer) {
+  return [layer name].slice(-1) == '-';
+}
+function sanitize_filename(name){
+  return name.replace(/(\s|:|\/)/g ,"_").replace(/__/g,"_").replace("*","").replace("+","").replace("&","");
+}
+function has_art(layer) {
+  // return true;
+  if(is_group(layer) && !should_flatten_layer(layer)) {
+    var has_art = false;
+
+    var sublayers = [layer layers];
+    for (var sub=([sublayers length] - 1); sub >= 0; sub--) {
+      var sublayer = sublayers[sub];
+      if(!should_ignore_layer(sublayer) && !should_become_view(sublayer)) {
+        has_art = true;
+      }
+    }
+    return has_art;
+
+  } else {
+    return true;
+  }
+}
+function export_layer(layer, depth) {
+  log_depth("Exporting <" + [layer name] + ">", depth);
+  var filename = images_folder + "/" + sanitize_filename([layer name]) + ".png";
+
+  // copy off-screen
+  var copy = [layer duplicate];
+  var frame = [copy frame];
+  [frame setX:-100000];
+  [frame setY:-100000];
+
+  var artnames = "";
+  var has_art = false;
+
+  // remove subgroups and only leave shapes
+  if(is_group(layer) && !should_flatten_layer(layer)) {
+    // log([layer name] + " is a group and i'm trying to extract its shapes")
+    var sublayers = [copy layers];
+    for (var sub=([sublayers length] - 1); sub >= 0; sub--) {
+      var sublayer = sublayers[sub];
+      if(!should_ignore_layer(sublayer)) {
+        // log("       " + [layer name] + "." + [sublayer name] + " (" + [sublayer className] + ")");
+        if(should_become_view(sublayer)) {
+          log("     REMOVING " + [sublayer name]);
+          [sublayer removeFromParent];
+        } else {
+          log("     KEEPING " + [sublayer name]);
+          artnames += [sublayer name] + ", ";
+          has_art = true;
+        }
+      }
+
+    }
+  } else {
+    // not a group, single art
+    has_art = true;
+  }
+
+  if(!has_art) {
+    log_depth("Exporting <" + [layer name] + ">, no image", depth);
+  } else {
+    log_depth("Exporting <" + [layer name] + "> including children art " + artnames, depth);
+
+    // export
+    // var rect = [copy rectByAccountingForStyleSize:[[copy absoluteRect] rect]],
+    //     slice = [MSSlice sliceWithRect:rect scale:2];
+    var rect = [copy rectByAccountingForStyleSize:[[copy absoluteRect] rect]],
+        slice = [GKRect rectWithRect:rect]
+
+    if (in_sandbox()) {
+      sandboxAccess.accessFilePath_withBlock_persistPermission(target_folder, function(){
+        [doc saveArtboardOrSlice:slice toFile:filename];
+      }, true)
+    } else {
+      [doc saveArtboardOrSlice:slice toFile:filename];
+    }
+  }
+
+  // remove it
+  [copy removeFromParent];
+}
+function should_flatten_layer(layer) {
+  var name = [layer name];
+  if(name.slice(-1) == "*") {
+    return true;
+  } else {
+    return false;
+  }
+}
+function log_depth(message, depth) {
+  var padding = "";
+  for(var i=0; i<depth; i++) {
+    padding = padding + ">"
+  }
+  log(padding + " " + message);
+}
+function process_layer(layer,metadata_container,depth) {
+
+  if (should_ignore_layer(layer)) {
+    log_depth("Ignoring <" + [layer name] + "> of type <" + [layer className] + ">", depth);
+    return;
+  }
+
+  if(should_become_view(layer)){
+    log_depth("Processing <" + [layer name] + "> of type <" + [layer className] + ">", depth);
+    // If layer is a group, do:
+
+    // temporarily show it
+    if (![layer isVisible]) {
+      [layer setName:[layer name] + "&"]
+    }
+    [layer setIsVisible:true];
+
+    // - Get layer data
+    var layer_data = extract_metadata_from(layer);
+    layer_data.children = [];
+
+    // - Export image if layer has no subgroups
+    if (!should_flatten_layer(layer) && is_group(layer)) {
+      var sublayers = [layer layers];
+      // Apparently, Sketch returns child layers in reverse order (back to front),
+      // so we'll loop backwards through them:
+      for (var sub=([sublayers length] - 1); sub >= 0; sub--) {
+        var current = sublayers[sub];
+        process_layer(current,layer_data.children,depth+1);
+      }
+    }
+    export_layer(layer, depth);
+    metadata_container.push(layer_data);
+
+    if ([layer name].slice(-1) == '&') {
+      [layer setIsVisible:false];
+      [layer setName:[layer name].slice(0, -1)];
+    }
+  }
+}
+function save_file_from_string(filename,the_string) {
+  var path = [@"" stringByAppendingString:filename],
+      str = [@"" stringByAppendingString:the_string];
+
+  if (in_sandbox()) {
+    sandboxAccess.accessFilePath_withBlock_persistPermission(filename, function(){
+      [str writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:null];
+    }, true)
+  } else {
+    [str writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:null];
+  }
+}
+function get_next_id() {
+  return ++id;
+}
+function calculate_real_position_for(layer) {
+
+  var gkrect = [GKRect rectWithRect:[layer rectByAccountingForStyleSize:[[layer absoluteRect] rect]]],
+      absrect = [layer absoluteRect];
+
+  var rulerDeltaX = [absrect rulerX] - [absrect x],
+      rulerDeltaY = [absrect rulerY] - [absrect y],
+      GKRectRulerX = [gkrect x] + rulerDeltaX,
+      GKRectRulerY = [gkrect y] + rulerDeltaY;
+
+  return {
+    x: GKRectRulerX,
+    y: GKRectRulerY
+  }
+}
+function extract_metadata_from(layer) {
+  var frame = [layer frame],
+  gkrect = [GKRect rectWithRect:[layer rectByAccountingForStyleSize:[[layer absoluteRect] rect]]],
+  absrect = [layer absoluteRect],
+  position = calculate_real_position_for(layer),
+  x = position.x,
+  y = position.y,
+  w = [gkrect width],
+  h = [gkrect height];
+
+  //metadata.id = get_next_id(); // FIXME
+  var metadata = {
+    name: sanitize_filename([layer name]),
+    layerFrame: {
+      x: x,
+      y: y,
+      width: w,
+      height: h
+    },
+    maskFrame: null
+  };
+
+  if(has_art(layer)) {
+    metadata.image = {
+      path: "images/" + sanitize_filename([layer name]) + ".png",
+      frame: {
+        x: x,
+        y: y,
+        width: w,
+        height: h
+      }
+    };
+    metadata.imageType = "png";
+    // TODO: Find out how the modification hash is calculated in Framer.app
+    // metadata.modification = new Date();
+  }
+
+  // if it was invisible, mark this in the metadata as well
+  if ([layer name].slice(-1) == '&') {
+    metadata.visible = false
+  }
+
+  return metadata;
+}
+
+var document_path = [[doc fileURL] path].split([doc displayName])[0],
+    document_name = [doc displayName].replace(".sketch",""),
+    target_folder = document_path + document_name,
+    images_folder = target_folder + "/images",
+    framer_folder = target_folder + "/framer",
+    sass_folder = document_path + document_name + "/assets" + "/sass" + "/atoms",
+    file_manager = [NSFileManager defaultManager],
+    id = 0,
+    templates = {
+      "index.html": "<!DOCTYPE html>\n<html>\n\t<head>\n\t\t<meta charset=\"utf-8\">\n\t\t\n\t\t<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">\n\t\t<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black\">\n\t\t<meta name=\"format-detection\" content=\"telephone=no\">\n\t\t<meta name=\"viewport\" content=\"width=640,initial-scale=0.5,user-scalable=no\">\n\t\t\n\t\t<style type=\"text/css\" media=\"screen\">\n\t\t\n\t\t* {\n\t\t\tmargin:0;\n\t\t\tpadding:0;\n\t\t\tborder:none;\n\t\t\t-webkit-user-select:none;\n\t\t}\n\n\t\tbody {\n\t\t\tbackground-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAMAAAC6V+0/AAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAAZQTFRFMzMzDBMatgEYWQAAABhJREFUeNpiYIADRjhgGNKCw8UfcAAQYACltADJ8fw9RwAAAABJRU5ErkJggg==);\n\t\t\tfont: 28px/1em \"Helvetica\";\n\t\t\tcolor: #FFF;\n\t\t\t-webkit-tap-highlight-color: rgba(0,0,0,0);\n\t\t\t-webkit-perspective: 1000px;\n\t\t}\n\t\t\n\t\t::-webkit-scrollbar {\n\t\t\twidth: 0px;\n\t\t\theight: 0px;\n\t\t}\n\t\t\n\t\t</style>\n\t\t\n\t</head>\n\t<body>\n\t\t{{ views }}\n\t\t<script src=\"framer/framer.js\"></script>\n\t\t<script src=\"framer/framerps.js\"></script>\n\t\t<script src=\"app.js\"></script>\n\t</body>\n</html>",
+      "_sketch.scss": "$test: {{ class }};",
+      "app.js": "// Hello, welcome to your new Framer project. This is where you should \n// start coding. Feel free to remove all of this code.\n// \n// Just to rehash: Framer just converted all your layer groups into framer\n// views. Just drop index.html (next to this file) on your browser to see\n// the result. Every view is available under the global PSD object, so if you\n// had a layer group called MyPhoto you can find it under PSD[\"MyPhoto\"].\n// \n// You can safely re-run the Framer app any time and this code will stay \n// intact. Framer will only update the graphics.\n// \n// Some links that could come in handy:\n// \n// \t- Docs: \thttp://www.framer.com/documentation\n// \t- Examples: http://www.framer.com/examples\n\n\n// ==============================================================\n// Example: bounce all the views!\n\n\n// Simple reusable function that binds a bounce to a click on a view\nfunction bounceOnClick(view) {\n\t\n\t// If the view is a normal view (not a scrollview)\n\tif (view instanceof View) {\n\t\t\n\t\t// Listen to a click event\n\t\tview.on(\"click\", function(event) {\n\t\t\t\n\t\t\t// Stop sending the click event to underlying views after this\n\t\t\tevent.stopPropagation()\n\t\t\t\n\t\t\t// \"Wind up\" the spring\n\t\t\tview.scale = 0.7\n\t\t\t\n\t\t\t// And scale back to full size with a spring curve\n\t\t\tview.animate({\n\t\t\t\tproperties:{scale:1.0},\n\t\t\t\tcurve: \"spring(1000,15,500)\"\n\t\t\t})\n\t\t})\n\t}\n}\n\n\n// Loop through all the exported views\nfor (var layerGroupName in PSD) {\n\tbounceOnClick(PSD[layerGroupName]);\n}",
+      "framerps.js": "var loadViews = function() {\n\t\n\tvar Views = []\n\tvar ViewsByName = {}\n\t\n\tcreateView = function(info, superView) {\n\t\t\n\t\t// console.log(\"createView\", info.name, \"superView: \", superView)\n\t\t\n\t\tvar viewType, viewFrame\n\t\tvar viewInfo = {\n\t\t\tclip: false\n\t\t}\n\t\t\n\t\tif (info.image) {\n\t\t\tviewType = ImageView\n\t\t\tviewFrame = info.image.frame\n\t\t\tviewInfo.image = \"images/\" + info.name + \".\" + info.imageType\n\t\t}\n\t\t\n\t\telse {\n\t\t\tviewType = View\n\t\t\tviewFrame = info.layerFrame\n\t\t}\n\n\t\tviewInfo.visible = info.visible\n\t\t\n\t\t// If this layer group has a mask, we take the mask bounds\n\t\t// as the frame and clip the layer\n\t\tif (info.maskFrame) {\n\t\t\tviewFrame = info.maskFrame\n\t\t\tviewInfo.clip = true\n\t\t\t\n\t\t\t// If the layer name has \"scroll\" we make this a scroll view\n\t\t\tif (info.name.toLowerCase().indexOf(\"scroll\") != -1) {\n\t\t\t\tviewType = ScrollView\n\t\t\t}\n\t\t\t\n\t\t\t// If the layer name has \"paging\" we make this a paging view\n\t\t\tif (info.name.toLowerCase().indexOf(\"paging\") != -1) {\n\t\t\t\tviewType = ui.PagingView\n\t\t\t}\n\n\t\t}\n\t\t\n\t\tvar view = new viewType(viewInfo)\n\t\t\n\t\tview.frame = viewFrame\n\t\t\n\t\t// If the view has a contentview (like a scrollview) we add it\n\t\t// to that one instead.\n\t\tif (superView && superView.contentView) {\n\t\t\tview.superView = superView.contentView\n\t\t} else {\n\t\t\tview.superView = superView\n\t\t}\n\t\t\n\t\tview.name = info.name\n\t\tview.viewInfo = info\n\t\t\n\t\tViews.push(view)\n\t\tViewsByName[info.name] = view\n\n\t\t// If the layer name contains draggable we create a draggable for this layer\n\t\tif (info.name.toLowerCase().indexOf(\"draggable\") != -1) {\n\t\t\tview.draggable = new ui.Draggable(view)\n\t\t}\n\n\t\tfor (var i in info.children) {\n\t\t\tcreateView(info.children[info.children.length - 1 - i], view)\n\t\t}\n\n\t}\n\t\t\n\t// Loop through all the photoshop documents\n\tfor (var documentName in FramerPS) {\n\t\t// Load the layers for this document\n\t\tfor (var layerIndex in FramerPS[documentName]) {\n\t\t\tcreateView(FramerPS[documentName][layerIndex])\n\t\t}\n\t}\n\t\n\t\n\tfor (var i in Views) {\n\t\t\n\t\tvar view = Views[i]\n\t\t\n\t\t// // Views without subviews and image should be 0x0 pixels\n\t\tif (!view.image && !view.viewInfo.maskFrame && !view.subViews.length) {\n\t\t\tconsole.log(view.name, view.viewInfo.maskFrame)\n\t\t\tview.frame = {x:0, y:0, width:0, height:0}\n\t\t}\n\t\t\n\t\tfunction shouldCorrectView(view) {\n\t\t\treturn !view.image && !view.viewInfo.maskFrame\n\t\t}\n\n\t\t// If a view has no image or mask, make it the size of it's combined subviews\n\t\tif (shouldCorrectView(view)) {\n\n\t\t\tvar frame = null\n\t\t\t\n\t\t\tfunction traverse(views) {\n\t\t\t\tviews.map(function(view) {\n\n\t\t\t\t\tif (shouldCorrectView(view)) {\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n\n\t\t\t\t\tif (!frame) {\n\t\t\t\t\t\tframe = view.frame\n\t\t\t\t\t} else {\n\t\t\t\t\t\tframe = frame.merge(view.frame)\n\t\t\t\t\t}\n\n\t\t\t\t\ttraverse(view.subViews)\n\t\t\t\t})\n\t\t\t}\n\t\t\t\n\t\t\ttraverse(view.subViews)\n\t\t\tview.frame = frame\n\t\t\t\n\t\t}\n\t\t\n\t\t// Correct all the view frames for the superView coordinate system\n\t\tif (view.superView) {\n\t\t\tview.frame = view.superView.convertPoint(view.frame)\n\t\t}\n\t\t\n\t}\n\t\n\treturn ViewsByName\n\n}\n\nwindow.PSD = loadViews()\n"
+    }
+
+function main() {
+
+  log('#################################################################################################################################################');
+
+  // Create folders
+  if (in_sandbox()) {
+    sandboxAccess.accessFilePath_withBlock_persistPermission(target_folder, function(){
+      [file_manager createDirectoryAtPath:target_folder withIntermediateDirectories:true attributes:nil error:nil];
+      [file_manager createDirectoryAtPath:sass_folder withIntermediateDirectories:true attributes:nil error:nil];
+      [file_manager createDirectoryAtPath:images_folder withIntermediateDirectories:true attributes:nil error:nil];
+      [file_manager createDirectoryAtPath:framer_folder withIntermediateDirectories:true attributes:nil error:nil];
+    }, true)
+  } else {
+    [file_manager createDirectoryAtPath:sass_folder withIntermediateDirectories:true attributes:nil error:nil];
+    [file_manager createDirectoryAtPath:target_folder withIntermediateDirectories:true attributes:nil error:nil];
+    [file_manager createDirectoryAtPath:images_folder withIntermediateDirectories:true attributes:nil error:nil];
+    [file_manager createDirectoryAtPath:framer_folder withIntermediateDirectories:true attributes:nil error:nil];
+  }
+
+  // Get all layers in current page
+  var all_layers = [[doc currentPage] layers],
+      metadata = [];
+
+  for (var i=0; i < [all_layers length]; i++) {
+    process_layer(all_layers[i],metadata, 0);
+  }
+
+  if(![file_manager fileExistsAtPath:(sass_folder + "atoms_sketch.scss")]) {
+    save_file_from_string(sass_folder + "_sketch.scss",  templates["_sketch.scss"].replace("{{ class }}", color));
+  }
+
+  log('#################################################################################################################################################');
+
+  // Display message in toolbar
+  [doc showMessage: "Success!"];
+
+}
+
+/*
+
+This plugin will export your Sketch document to a Framer project.
+
+This command REQUIRES at least Sketch Version 2.3 (419),
+as it uses an API not available in earlier versions
+
+- Every layer group will become an ImageView, backed by the pixel and/or shape layers in that layer group.
+- Views are accessible by name under the PSD object (yeah, I know...)
+- Framer respects the layer hierarchy, so a sub layer group will become a subview. This way you can define your view structure in Photoshop.
+- TODO: Layer groups with vector masks will become views with clipping enabled. You can optionally add "scroll" to the layer group name to make it a ScrollView.
+- Layer group names should be unique, if they're not Framer will silently rename them on export.
+
+// TODO: Check for duplicated names in exported files
+// TODO: Calculate proper IDs (not sure what they're used for, but hey...)
+// TODO: Calculate proper modification hash
+// TODO: Embed framer.js on this file, instead of 'curl'ing it from Github
+
+*/
+
+main();
